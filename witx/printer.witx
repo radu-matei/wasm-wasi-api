@@ -1,0 +1,8 @@
+(use "errno.witx")
+
+;;; Print a greeting message.
+(module $printer
+  (@interface func (export "print_greeting")
+    (result $error $errno)
+  )
+)
