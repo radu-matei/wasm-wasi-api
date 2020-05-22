@@ -1,10 +1,7 @@
 use anyhow::{bail, Context as _, Result};
 use std::path::Path;
-use wasmtime::{Engine, Instance, Module, Store, Val};
+use wasmtime::{Engine, Extern, Instance, Linker, Module, Store, Val};
 use wasmtime_wasi::{old::snapshot_0::Wasi as WasiSnapshot0, Wasi};
-
-mod printer;
-use printer as Printer;
 
 fn main() {
     let config = wasmtime::Config::new();
@@ -29,35 +26,48 @@ fn instantiate_module(
 ) -> Result<Instance> {
     let data = wat::parse_file(path)?;
     let module = Module::new(store, &data)?;
+    let mut linker = Linker::new(store);
 
-    // Resolve import using module_registry.
-    let imports = module
-        .imports()
-        .map(|i| {
-            let export = match i.module() {
-                "wasi_snapshot_preview1" => {
-                    module_registry.wasi_snapshot_preview1.get_export(i.name())
-                }
-                "wasi_unstable" => module_registry.wasi_unstable.get_export(i.name()),
-
-                "printer" => panic!("figure out how to link the proper exports"),
-                other => bail!("import module `{}` was not found", other),
-            };
-            match export {
-                Some(export) => Ok(export.clone().into()),
-                None => bail!(
-                    "import `{}` was not found in module `{}`",
-                    i.name(),
-                    i.module()
-                ),
+    for (_, item) in module.imports().enumerate() {
+        match item.module() {
+            "wasi_snapshot_preview1" => {
+                linker.define(
+                    "wasi_snapshot_preview1",
+                    item.name(),
+                    Extern::Func(
+                        module_registry
+                            .wasi_snapshot_preview1
+                            .get_export(item.name())
+                            .unwrap()
+                            .clone(),
+                    ),
+                )?;
             }
+            "wasi_unstable" => {
+                linker.define(
+                    "wasi_unstable",
+                    item.name(),
+                    Extern::Func(
+                        module_registry
+                            .wasi_unstable
+                            .get_export(item.name())
+                            .unwrap()
+                            .clone(),
+                    ),
+                )?;
+            }
+            _ => {}
+        }
+    }
+
+    linker
+        .func("host", "double", |x: i32| {
+            println!("WORKING!");
+            x * 2
         })
-        .collect::<Result<Vec<_>, _>>()?;
+        .unwrap();
 
-    let instance =
-        Instance::new(&module, &imports).context(format!("failed to instantiate {:?}", path))?;
-
-    Ok(instance)
+    linker.instantiate(&module)
 }
 
 fn invoke_export(instance: Instance, name: &str) -> Result<()> {
@@ -81,8 +91,8 @@ fn invoke_export(instance: Instance, name: &str) -> Result<()> {
             Val::I64(i) => println!("{}", i),
             Val::F32(f) => println!("{}", f),
             Val::F64(f) => println!("{}", f),
+            Val::FuncRef(_) => println!("<funcref>"),
             Val::AnyRef(_) => println!("<anyref>"),
-            Val::FuncRef(_) => println!("<anyref>"),
             Val::V128(i) => println!("{}", i),
         }
     }
@@ -93,7 +103,6 @@ fn invoke_export(instance: Instance, name: &str) -> Result<()> {
 struct ModuleRegistry {
     wasi_snapshot_preview1: Wasi,
     wasi_unstable: WasiSnapshot0,
-    // printer: Printer,
 }
 
 impl ModuleRegistry {
